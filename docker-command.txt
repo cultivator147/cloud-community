@@ -1,0 +1,12 @@
+docker build -t mental-backend .
+docker build -t mental-frontend .
+docker build -t mental-mysql .
+
+docker tag mental-backend:latest 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-backend:latest
+docker tag mental-frontend:latest 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-frontend :latest
+docker tag mental-mysql:latest 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-mysql:latest
+
+
+ docker push 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-backend:latest
+ docker push 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-frontend:latest
+ docker push 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-mysql:latest
