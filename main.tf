@@ -1,56 +1,213 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 4.0"
-    }
+data "aws_availability_zones" "available_zones" {
+  state = "available"
+}
+
+
+# VPC
+resource "aws_vpc" "default" {
+  cidr_block = "10.32.0.0/16"
+}
+
+# 2 public subnets, 2 private subnets
+resource "aws_subnet" "public" {
+  count                   = 2
+  cidr_block              = cidrsubnet(aws_vpc.default.cidr_block, 8, 2 + count.index)
+  availability_zone       = data.aws_availability_zones.available_zones.names[count.index]
+  vpc_id                  = aws_vpc.default.id
+  map_public_ip_on_launch = true
+}
+
+resource "aws_subnet" "private" {
+  count             = 2
+  cidr_block        = cidrsubnet(aws_vpc.default.cidr_block, 8, count.index)
+  availability_zone = data.aws_availability_zones.available_zones.names[count.index]
+  vpc_id            = aws_vpc.default.id
+  connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    host     = self.public_ip
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install -y mysql",
+      "mysql -h ${aws_db_instance.mysql.endpoint} -P 3306 -u admin -p${aws_db_instance.mysql.password} -e 'CREATE DATABASE example_db;'",
+    ]
   }
 }
-provider "aws" {
-    access_key ="AKIAU7TH4PYWX3FF2MI2" 
-    secret_key = "tpjjYicHFedHkZXEXuaBg5KExuFOGMjqWLeDrJzn"
-    region = "us-west-2"
+
+# SECURITY GROUP FOR MYSQL 
+
+resource "aws_security_group" "mysql" {
+  name_prefix = "mysql-sg-"
 }
 
+resource "aws_security_group_rule" "mysql_inbound" {
+  security_group_id        = aws_security_group.mysql.id
+  type                     = "ingress"
+  from_port                = 3306
+  to_port                  = 3306
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ec2.id
+}
+
+
+# 4 EC2 Instances
+resource "aws_instance" "public_instance" {
+  count         = 2
+  ami           = "ami-0fcf52bcf5db7b003"
+  instance_type = "t2.micro"
+  subnet_id     = element(aws_subnet.public.*.id, count.index)
+
+  tags = {
+    Name = "public-instance-${count.index}"
+  }
+}
+
+resource "aws_instance" "private_instance" {
+  count         = 2
+  ami           = "ami-0fcf52bcf5db7b003"
+  instance_type = "t2.micro"
+  subnet_id     = element(aws_subnet.private.*.id, count.index)
+
+  tags = {
+    Name = "private-instance-${count.index}"
+  }
+}
+
+# CREATE ECR
 resource "aws_ecr_repository" "app_ecr_repo" {
-  name = "app-repo"
+  name = "caduceus-repo"
 }
 
-# create ecs cluster
-resource "aws_ecs_cluster" "my_cluster" {
-  name = "app-cluster" # Name your cluster here
+
+
+# Internet gateway
+resource "aws_internet_gateway" "gateway" {
+  vpc_id = aws_vpc.default.id
 }
 
-# task definition
-resource "aws_ecs_task_definition" "app_task" {
-  family                   = "app-first-task" # Name your task
-  container_definitions    = <<DEFINITION
-  [
-    {
-      "name": "app-first-task",
-      "image": "${aws_ecr_repository.app_ecr_repo.repository_url}",
-      "essential": true,
-      "portMappings": [
-        {
-          "containerPort": 5000,
-          "hostPort": 5000
-        }
-      ],
-      "memory": 512,
-      "cpu": 256
-    }
-  ]
-  DEFINITION
-  requires_compatibilities = ["FARGATE"] # use Fargate as the launch type
-  network_mode             = "awsvpc"    # add the AWS VPN network mode as this is required for Fargate
-  memory                   = 512         # Specify the memory the container requires
-  cpu                      = 256         # Specify the CPU the container requires
-  execution_role_arn       = "${aws_iam_role.ecsTaskExecutionRole.arn}"
+# AWS route
+resource "aws_route" "internet_access" {
+  route_table_id         = aws_vpc.default.main_route_table_id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.gateway.id
 }
 
-# IAM
+
+# EIP
+resource "aws_eip" "gateway" {
+  count      = 2
+  vpc        = true
+  depends_on = [aws_internet_gateway.gateway]
+}
+
+# NAT GATEWAY
+resource "aws_nat_gateway" "gateway" {
+  count         = 2
+  subnet_id     = element(aws_subnet.public.*.id, count.index)
+  allocation_id = element(aws_eip.gateway.*.id, count.index)
+}
+
+# ROUTE TABLE
+resource "aws_route_table" "private" {
+  count  = 2
+  vpc_id = aws_vpc.default.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    nat_gateway_id = element(aws_nat_gateway.gateway.*.id, count.index)
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = element(aws_subnet.private.*.id, count.index)
+  route_table_id = element(aws_route_table.private.*.id, count.index)
+}
+
+
+#CONFIG
+
+# SECURITY GROUP FOR LOAD BALANCER
+resource "aws_security_group" "lb" {
+  name        = "alb-security-group"
+  vpc_id      = aws_vpc.default.id
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 80
+    to_port     = 80
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# LOAD BALANCER CONFIGURATION
+resource "aws_lb" "default" {
+  name            = "caduceus-lb"
+  subnets         = aws_subnet.public.*.id
+  security_groups = [aws_security_group.lb.id]
+}
+
+resource "aws_lb_target_group" "hello_world" {
+  name        = "caduceus-lb-target-group"
+  port        = 80
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.default.id
+  target_type = "ip"
+}
+
+resource "aws_lb_listener" "hello_world" {
+  load_balancer_arn = aws_lb.default.id
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    target_group_arn = aws_lb_target_group.hello_world.id
+    type             = "forward"
+  }
+}
+
+
+# ECS cluster & ECS instance
+# ECS task definition
+resource "aws_ecs_task_definition" "hello_world" {
+  family                   = "caduceus-frontend"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 1024
+  memory                   = 2048
+
+  container_definitions = <<DEFINITION
+[
+  {
+    "image": "342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:frontend",
+    "cpu": 1024,
+    "memory": 2048,
+    "name": "caduceus-frontend",
+    "networkMode": "awsvpc",
+    "portMappings": [
+      {
+        "containerPort": 3000,
+        "hostPort": 3000
+      }
+    ]
+  }
+]
+DEFINITION
+execution_role_arn       = "${aws_iam_role.ecsTaskExecutionRole.arn}"
+
+}
+# ----
 resource "aws_iam_role" "ecsTaskExecutionRole" {
-  name               = "ecsTaskExecutionRole"
+  name               = "ecsTaskExecutionRoleCaduceus"
   assume_role_policy = "${data.aws_iam_policy_document.assume_role_policy.json}"
 }
 
@@ -69,112 +226,83 @@ resource "aws_iam_role_policy_attachment" "ecsTaskExecutionRole_policy" {
   role       = "${aws_iam_role.ecsTaskExecutionRole.name}"
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
+#-----
 
-# Provide a reference to your default VPC
-resource "aws_default_vpc" "default_vpc" {
-}
 
-# Provide references to your default subnets
-resource "aws_default_subnet" "default_subnet_a" {
-  # Use your own region here but reference to subnet 1a
-  availability_zone = "us-west-2a"
-}
+resource "aws_security_group" "hello_world_task" {
+  name        = "caduceus-security-group"
+  vpc_id      = aws_vpc.default.id
 
-resource "aws_default_subnet" "default_subnet_b" {
-  # Use your own region here but reference to subnet 1b
-  availability_zone = "us-west-2b"
-}
-
-# load balancer
-resource "aws_alb" "application_load_balancer" {
-  name               = "load-balancer-dev" #load balancer name
-  load_balancer_type = "application"
-  subnets = [ # Referencing the default subnets
-    "${aws_default_subnet.default_subnet_a.id}",
-    "${aws_default_subnet.default_subnet_b.id}"
-  ]
-  # security group
-  security_groups = ["${aws_security_group.load_balancer_security_group.id}"]
-}
-
-# Create a security group for the load balancer:
-resource "aws_security_group" "load_balancer_security_group" {
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # Allow traffic in from all sources
+    protocol        = "tcp"
+    from_port       = 3000
+    to_port         = 3000
+    security_groups = [aws_security_group.lb.id]
   }
 
   egress {
+    protocol    = "-1"
     from_port   = 0
     to_port     = 0
-    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-#Configure the load balancer with the VPC
-# networking we created earlier. This will distribute the balancer
-# traffic to the available zone:
-resource "aws_lb_target_group" "target_group" {
-  name        = "target-group"
-  port        = 80
-  protocol    = "HTTP"
-  target_type = "ip"
-  vpc_id      = "${aws_default_vpc.default_vpc.id}" # default VPC
+resource "aws_ecs_cluster" "main" {
+  name = "caduceus-cluster"
 }
 
-resource "aws_lb_listener" "listener" {
-  load_balancer_arn = "${aws_alb.application_load_balancer.arn}" #  load balancer
-  port              = "80"
-  protocol          = "HTTP"
-  default_action {
-    type             = "forward"
-    target_group_arn = "${aws_lb_target_group.target_group.arn}" # target group
-  }
-}
-
-#Create an ecs service
-resource "aws_ecs_service" "app_service" {
-  name            = "app-first-service"     # Name the service
-  cluster         = "${aws_ecs_cluster.my_cluster.id}"   # Reference the created Cluster
-  task_definition = "${aws_ecs_task_definition.app_task.arn}" # Reference the task that the service will spin up
+resource "aws_ecs_service" "hello_world" {
+  name            = "caduceus-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.hello_world.arn
+  desired_count   = var.app_count
   launch_type     = "FARGATE"
-  desired_count   = 3 # Set up the number of containers to 3
-
-  load_balancer {
-    target_group_arn = "${aws_lb_target_group.target_group.arn}" # Reference the target group
-    container_name   = "${aws_ecs_task_definition.app_task.family}"
-    container_port   = 5000 # Specify the container port
-  }
 
   network_configuration {
-    subnets          = ["${aws_default_subnet.default_subnet_a.id}", "${aws_default_subnet.default_subnet_b.id}"]
-    assign_public_ip = true     # Provide the containers with public IPs
-    security_groups  = ["${aws_security_group.service_security_group.id}"] # Set up the security group
+    security_groups = [aws_security_group.hello_world_task.id]
+    subnets         = aws_subnet.private.*.id
   }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.hello_world.id
+    container_name   = "caduceus-frontend"
+    container_port   = 3000
+  }
+
+  depends_on = [aws_lb_listener.hello_world]
 }
 
-# service security group
-resource "aws_security_group" "service_security_group" {
-  ingress {
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
-    # Only allowing traffic in from the load balancer security group
-    security_groups = ["${aws_security_group.load_balancer_security_group.id}"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+output "load_balancer_ip" {
+  value = aws_lb.default.dns_name
 }
 
-#Log the load balancer app URL
-output "app_url" {
-  value = aws_alb.application_load_balancer.dns_name
+# Connect EC2 to RDS Mysql community 
+resource "aws_security_group_rule" "ec2_inbound" {
+  security_group_id = aws_security_group.ec2.id
+  type              = "ingress"
+  from_port         = 3306
+  to_port           = 3306
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
+resource "aws_db_instance" "mysql" {
+  allocated_storage    = 20
+  engine               = "mysql"
+  engine_version       = "5.7"
+  instance_class       = "db.t2.micro"
+  name                 = "example-mysql"
+  username             = "admin"
+  password             = "password"
+  parameter_group_name = "default.mysql5.7"
+  skip_final_snapshot  = true
+
+  vpc_security_group_ids = [
+    aws_security_group.mysql.id,
+  ]
+
+  tags = {
+    Name = "caduceus-mysql"
+  }
 }
