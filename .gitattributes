@@ -1,0 +1,1 @@
+path/to/file.exe filter=lfs diff=lfs merge=lfs -text

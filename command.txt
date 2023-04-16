@@ -1,5 +1,5 @@
 1. Push
-aws ecr get-login-password --region ap-southeast-1| docker login --username AWS --password-stdin 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com
+aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 342741515821.dkr.ecr.us-west-2.amazonaws.com
 
 adwadw
 adwadwa

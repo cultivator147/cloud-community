@@ -7,6 +7,17 @@ docker tag nginx:1.23.3 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental
 docker tag mysql:8.0 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-mysql:latest
 
 
+//admin user
+docker tag nginx:1.23.3 342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:frontend3
+docker push 342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:frontend3
+
+docker tag nginx:1.23.3 342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:frontend
+docker push 342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:frontend
+
+docker tag hoidanit-sern-backend:latest 342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:backend
+docker push 342741515821.dkr.ecr.us-west-2.amazonaws.com/app-repo:backend
+
+
  docker push 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-backend:latest
  docker push 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-frontend:latest
  docker push 406858999943.dkr.ecr.ap-southeast-1.amazonaws.com/mental-mysql:latest
